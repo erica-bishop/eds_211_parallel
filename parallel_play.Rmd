@@ -1,0 +1,155 @@
+---
+title: "parallel playground"
+author: "Erica Bishop"
+date: "2023-02-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(parallel)
+library(furrr)
+library(terra)
+library(raster)
+library(tictoc)
+```
+#Slow computation
+
+```{r}
+rast_fs <- list.files('data', full.names = TRUE) #list files matching pattern - here specifying all full names
+
+r <- raster::raster(rast_fs[1]) #equivalent to terra rast function
+
+plot(r)
+
+#create df - big ol df
+df <- as.data.frame(r, xy = TRUE) %>% 
+  setNames(c('x', 'y', 'z')) %>% 
+  drop_na() %>% 
+  mutate(type = case_when(z < .1 ~ 'low',
+                          z < .25 ~ 'medium',
+                          z < 0.5 ~ 'high',
+                          TRUE ~ 'extreme'))
+
+#do some computations that will take a while to demonstrate parallel processing 
+
+summary_df <- df %>% 
+  group_by(type) %>% 
+  summarize(n_cells = n())
+
+
+```
+
+# A For Loop that will take a beat using computations above - iterate over files
+
+time the computation
+
+```{r}
+
+system.time({ #time computation
+
+out_list_loop <- vector('list', length = length(rast_fs)) %>% #initialize empty vector
+  setNames(rast_fs)
+
+for(f in rast_fs) {
+  
+  r <- raster::raster(rast_fs[1]) #equivalent to terra rast function
+  
+  df <- as.data.frame(r, xy = TRUE) %>% 
+    setNames(c('x', 'y', 'z')) %>% 
+    drop_na() %>% 
+    mutate(type = case_when(z < .1 ~ 'low',
+                            z < .25 ~ 'medium',
+                            z < 0.5 ~ 'high',
+                            TRUE ~ 'extreme'))
+  
+  summary_df <- df %>% 
+    group_by(type) %>% 
+    summarize(n_cells = n())
+  
+  out_list_loop[[f]] <- summary_df
+  
+} #END for loop
+
+}) #END system.time
+
+out_df_loop <- bind_rows(out_list_loop)
+
+```
+
+## Now do this more efficiently
+
+```{r}
+
+process_rast_file <- function(f) {
+  
+  r <- raster::raster(f)
+  
+  df <- as.data.frame(r, xy = TRUE) %>% 
+    setNames(c('x', 'y', 'z')) %>% 
+    drop_na() %>% 
+    mutate(type = case_when(z < 0.1 ~ 'low',
+                            z < 0.25 ~ 'medium',
+                            z < 0.5 ~ 'high',
+                            TRUE ~ 'vhi'))
+  summary_df <- df %>% 
+    group_by(type) %>% 
+    summarize(n_cells = n(),
+              f = basename(f))
+  
+  return(summary_df)
+} #END function
+
+```
+
+time using the function wiht lapply with tictoc
+
+```{r}
+tic() #start timer
+out_list_lapply <- lapply(X = rast_fs, FUN = process_rast_file) #run function over raster file list
+toc() #end timer
+
+```
+
+### mclapply (multicore list apply) - spread same computation over multiple cores
+
+```{r}
+#run same computation over multiple cores
+
+tic() #start timer
+out_list_mclapply <- parallel::mclapply(X = rast_fs,
+                                        FUN = process_rast_file,
+                                        mc.cores = 4) #specify number of cores to use
+toc() #end timer
+
+```
+
+### purrr
+
+```{r}
+
+tic() #start timer
+out_list_purr <- purrr::map(.x = rast_fs, .f = process_rast_file) #run function over raster file list - will return list
+toc() #end timer
+
+#could use map_dfr if you know what your output will be
+
+```
+
+### furrr - multicore version of purrr
+
+```{r}
+
+plan(multisession, workers = 4) #specify multisession for 4 cores
+
+tic()
+out_list_furrr <- furrr::future_map(.x = rast_fs, .f = process_rast_file)
+toc()
+
+
+```
+
